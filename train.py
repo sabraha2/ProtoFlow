@@ -23,6 +23,8 @@ import os.path as osp
 from contextlib import nullcontext
 
 from protoflow.utils import profile
+from protoflow.counterfactual import add_counterfactual_capability, get_dataset_config
+import math
 
 LOG_DIR = os.getenv('LOG_DIR', 'logs')
 
@@ -315,6 +317,66 @@ def run(args):
             print('EVALUATION STATS:')
             for name, score in test_scores.items():
                 print(f'  {name}: {score.item():.3f}')
+
+        if args.fit_prototypes:
+            print("\nAdding counterfactual capabilities...")
+            
+            # Determine features shape based on dataset
+            features_shape_map = {
+                'cifar10': [3, 32, 32],
+                'cifar100': [3, 32, 32], 
+                'mnist': [1, 28, 28],
+                'imagenet': [3, 224, 224],
+                'stl10': [3, 96, 96],
+                'pets': [3, 224, 224],
+                'flowers': [3, 224, 224],
+                'aircraft': [3, 224, 224],
+                'food': [3, 224, 224],
+                'caltech101': [3, 224, 224],
+                'cub200': [3, 224, 224],
+            }
+            features_shape = features_shape_map.get(args.dataset, [3, 32, 32])
+            
+            print(f"Using features_shape {features_shape} for dataset {args.dataset}")
+            
+            actual_model = model.module if world_size > 1 else model
+            
+            # Add counterfactual capability
+            enhanced_model = add_counterfactual_capability(
+                model=actual_model,
+                dataloader=dl_train,
+                features_shape=features_shape,
+                save_path=f"enhanced_checkpoint_{args.extra}.pt" if args.extra else "enhanced_checkpoint.pt"
+            )
+            
+            print("✓ Enhanced model with counterfactual capabilities saved!")
+            
+            # Optional: Test counterfactual generation on a few samples
+            if rank == 0 and args.debug:
+                print("Testing counterfactual generation...")
+                try:
+                    # Get a test sample
+                    test_images, test_labels = next(iter(dl_train))
+                    test_image = test_images[0:1].to(device)
+                    test_label = test_labels[0].item()
+                    
+                    # Generate explanation
+                    explanation = enhanced_model.generate_explanation(
+                        image=test_image,
+                        source_class=test_label
+                    )
+                    
+                    print(f"✓ Test counterfactual generated for class {test_label}")
+                    print(f"  Generated {len(explanation['counterfactuals'])} counterfactuals")
+                    
+                    # Print success rates
+                    for target_class, metrics in explanation['evaluations'].items():
+                        success = "✓" if metrics['prediction_success'] else "✗"
+                        print(f"  → Class {target_class}: {success} conf={metrics['target_confidence']:.3f}")
+                        
+                except Exception as e:
+                    print(f"Warning: Test counterfactual generation failed: {e}")
+    
     finally:
         cleanup(args.debug)
 
@@ -408,6 +470,8 @@ def main():
                         help='Prefetch data to CUDA devices')
     parser.add_argument('--use_shm', action='store_true',
                         help='Used shared memory to move data before training for speed')
+    parser.add_argument('--fit_prototypes', action='store_true',
+                   help='Fit class-conditional prototype distributions after training')
 
     args = parser.parse_args()
     print(args)
