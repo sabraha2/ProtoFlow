@@ -44,6 +44,8 @@ class ProtoFlowCounterfactualGenerator:
         print(f"Loading enhanced model from {checkpoint_path}")
         
         # Handle PyTorch 2.6+ weights_only safety restrictions
+        checkpoint = None
+        
         try:
             # First try: weights_only=False (safe for our own checkpoint)
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
@@ -71,34 +73,17 @@ class ProtoFlowCounterfactualGenerator:
                 except Exception as e3:
                     raise RuntimeError(f"Could not load checkpoint with any method: {e3}")
         
+        if checkpoint is None:
+            raise RuntimeError("Failed to load checkpoint with any method")
+        
         # Debug: Print checkpoint keys
         print("Checkpoint keys:", list(checkpoint.keys()))
         
         # Extract model configuration
         self.num_classes = checkpoint['num_classes']
         self.features_shape = checkpoint['features_shape']  # Should be [3, 32, 32]
-        raw_protos = checkpoint['prototypes']
-
-        if isinstance(raw_protos, dict):
-            self.prototypes = raw_protos
-        else:
-            try:
-                means = raw_protos.means      
-                vars_ = raw_protos.vars       
-                pis = raw_protos.pis          
-                self.prototypes = {
-                    i: {'mean': means[i], 'var': vars_[i], 'pi': pis[i]}
-                    for i in range(len(means))
-                }
-            except AttributeError:
-                raise RuntimeError(
-                    "Checkpoint 'prototypes' is a ClassConditionalPrototypes instance, "
-                    "but we couldn't find .means/.vars/.pis on it. "
-                    "Please adjust the loader to match the object's API."
-                )
- 
-
-        print(f"  Prototype classes: {list(self.prototypes.keys())}")
+        self.prototypes = checkpoint['prototypes']  # Class-conditional distributions
+        
         print(f"Model config:")
         print(f"  Classes: {self.num_classes}")
         print(f"  Features shape: {self.features_shape}")
