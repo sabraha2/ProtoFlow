@@ -43,7 +43,7 @@ class ProtoFlowCounterfactualGenerator:
         """Load the enhanced ProtoFlow model with counterfactual capabilities."""
         print(f"Loading enhanced model from {checkpoint_path}")
         
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         
         # Debug: Print checkpoint keys
         print("Checkpoint keys:", list(checkpoint.keys()))
