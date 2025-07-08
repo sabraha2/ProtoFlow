@@ -62,6 +62,8 @@ class RealProtoFlowCounterfactualGenerator:
         if self._try_load_real_protoflow(checkpoint):
             print("✓ Using REAL ProtoFlow DenseFlow decoder!")
             self.use_real_flow = True
+            # Still set up pixel prototypes as fallback
+            self._setup_pixel_prototypes()
         else:
             print("⚠️  Real flow unavailable, using pixel-space prototypes")
             self.use_real_flow = False
@@ -135,7 +137,7 @@ class RealProtoFlowCounterfactualGenerator:
                             
                         def _extract_features(self, x):
                             batch_size = x.shape[0]
-                            x_flat = x.view(batch_size, -1)  # [batch, 3072] for CIFAR-10
+                            x_flat = x.view(batch_size, -1).float()  # Ensure float32
                             
                             if x_flat.shape[1] != self.feature_dim:
                                 if x_flat.shape[1] > self.feature_dim:
@@ -146,8 +148,9 @@ class RealProtoFlowCounterfactualGenerator:
                                     padding_size = self.feature_dim - x_flat.shape[1]
                                     # Use a simple linear projection to create more features
                                     # This mimics what a real flow network might do
-                                    extra_features = torch.tanh(torch.mm(x_flat, 
-                                        torch.randn(x_flat.shape[1], padding_size, device=x.device) * 0.1))
+                                    projection_matrix = torch.randn(x_flat.shape[1], padding_size, 
+                                                                  device=x.device, dtype=x.dtype) * 0.1
+                                    extra_features = torch.tanh(torch.mm(x_flat, projection_matrix))
                                     features = torch.cat([x_flat, extra_features], dim=1)
                             else:
                                 features = x_flat
@@ -223,7 +226,7 @@ class RealProtoFlowCounterfactualGenerator:
             train_loader = self._get_cifar10_dataloader(train=True, batch_size=128)
             
             # Initialize accumulators
-            class_sums = [torch.zeros(3, 32, 32, device=self.device) for _ in range(self.num_classes)]
+            class_sums = [torch.zeros(3, 32, 32, device=self.device, dtype=torch.float32) for _ in range(self.num_classes)]
             class_counts = [0] * self.num_classes
             
             print("Computing class-mean images...")
@@ -232,7 +235,7 @@ class RealProtoFlowCounterfactualGenerator:
                     if batch_idx % 50 == 0:
                         print(f"  Processing batch {batch_idx}...")
                     
-                    images = images.to(self.device)
+                    images = images.to(self.device).float()
                     for img, label in zip(images, labels):
                         class_sums[label.item()] += img
                         class_counts[label.item()] += 1
@@ -245,18 +248,18 @@ class RealProtoFlowCounterfactualGenerator:
             self.pixel_prototypes = []
             for i in range(self.num_classes):
                 if class_counts[i] > 0:
-                    mean_img = class_sums[i] / class_counts[i]
+                    mean_img = (class_sums[i] / class_counts[i]).float()
                     self.pixel_prototypes.append(mean_img)
                 else:
                     # Fallback random image
-                    self.pixel_prototypes.append(torch.randn(3, 32, 32, device=self.device))
+                    self.pixel_prototypes.append(torch.randn(3, 32, 32, device=self.device, dtype=torch.float32))
             
             print(f"✓ Computed pixel prototypes for {len(self.pixel_prototypes)} classes")
             
         except Exception as e:
             print(f"Failed to compute pixel prototypes: {e}")
             # Ultimate fallback - random prototypes
-            self.pixel_prototypes = [torch.randn(3, 32, 32, device=self.device) 
+            self.pixel_prototypes = [torch.randn(3, 32, 32, device=self.device, dtype=torch.float32) 
                                    for _ in range(self.num_classes)]
     
     def _load_prototypes(self, checkpoint):
@@ -267,11 +270,11 @@ class RealProtoFlowCounterfactualGenerator:
             self.prototypes = {}
             for class_idx in range(self.num_classes):
                 if class_idx in raw_protos.class_means:
-                    mean_tensor = raw_protos.class_means[class_idx]
+                    mean_tensor = raw_protos.class_means[class_idx].float()
                     self.prototypes[class_idx] = {
                         'mean': mean_tensor,
-                        'var': torch.ones_like(mean_tensor),
-                        'pi': torch.tensor(1.0)
+                        'var': torch.ones_like(mean_tensor, dtype=torch.float32),
+                        'pi': torch.tensor(1.0, dtype=torch.float32)
                     }
             print(f"✓ Loaded prototypes for {len(self.prototypes)} classes, feature dim: {list(self.prototypes.values())[0]['mean'].shape[0] if self.prototypes else 'unknown'}")
         else:
@@ -285,9 +288,9 @@ class RealProtoFlowCounterfactualGenerator:
             
             self.prototypes = {
                 i: {
-                    'mean': torch.randn(feature_dim, device=self.device), 
-                    'var': torch.ones(feature_dim, device=self.device), 
-                    'pi': torch.tensor(1.0)
+                    'mean': torch.randn(feature_dim, device=self.device, dtype=torch.float32), 
+                    'var': torch.ones(feature_dim, device=self.device, dtype=torch.float32), 
+                    'pi': torch.tensor(1.0, dtype=torch.float32)
                 } 
                 for i in range(self.num_classes)
             }
@@ -339,21 +342,26 @@ class RealProtoFlowCounterfactualGenerator:
         """Generate counterfactual using real ProtoFlow (if available)."""
         with torch.no_grad():
             try:
+                # Ensure image is float32
+                source_image = source_image.float()
+                
                 # Extract features using the ProtoFlow model
                 z, _ = self.model.model.log_prob(source_image, return_z=True)
                 
                 # Flatten z for prototype operations
                 z_flat = z.flatten(1) if z.dim() > 2 else z
+                z_flat = z_flat.float()  # Ensure float32
                 
                 # Get target prototype
-                target_proto = self.get_class_prototype(target_class)
+                target_proto = self.get_class_prototype(target_class).float()
                 if target_proto.shape[0] != z_flat.shape[1]:
                     min_dim = min(target_proto.shape[0], z_flat.shape[1])
                     target_proto = target_proto[:min_dim]
                     z_flat = z_flat[:, :min_dim]
                     # Pad z_flat if needed
                     if z_flat.shape[1] < target_proto.shape[0]:
-                        padding = torch.zeros(z_flat.shape[0], target_proto.shape[0] - z_flat.shape[1], device=z_flat.device)
+                        padding = torch.zeros(z_flat.shape[0], target_proto.shape[0] - z_flat.shape[1], 
+                                            device=z_flat.device, dtype=z_flat.dtype)
                         z_flat = torch.cat([z_flat, padding], dim=1)
                 
                 # Interpolate in latent space
@@ -377,7 +385,8 @@ class RealProtoFlowCounterfactualGenerator:
     
     def generate_counterfactual_pixel(self, source_image, target_class, alpha=0.5):
         """Generate counterfactual using pixel-space interpolation."""
-        proto_img = self.pixel_prototypes[target_class]
+        source_image = source_image.float()  # Ensure float32
+        proto_img = self.pixel_prototypes[target_class].float()
         
         # Ensure same device and shape
         proto_img = proto_img.to(source_image.device)
@@ -397,7 +406,7 @@ class RealProtoFlowCounterfactualGenerator:
     def get_class_prototype(self, class_idx):
         """Get prototype for a specific class."""
         if class_idx in self.prototypes:
-            return self.prototypes[class_idx]['mean']
+            return self.prototypes[class_idx]['mean'].float()
         else:
             # Get the correct feature dimension
             feature_dim = 4928  # Default
@@ -406,13 +415,16 @@ class RealProtoFlowCounterfactualGenerator:
                     feature_dim = self.model.gmms[0].mu.shape[-1]
                 except:
                     pass
-            return torch.randn(feature_dim, device=self.device)
+            return torch.randn(feature_dim, device=self.device, dtype=torch.float32)
     
     def classify_image(self, image):
         """Classify image using ProtoFlow or pixel-space similarity."""
         with torch.no_grad():
             if self.use_real_flow and hasattr(self, 'model'):
                 try:
+                    # Ensure image is float32
+                    image = image.float()
+                    
                     # Use real ProtoFlow classification
                     logits = self.model(image, flow_grad=False)
                     probs = torch.softmax(logits, dim=1)
@@ -422,6 +434,12 @@ class RealProtoFlowCounterfactualGenerator:
                     print(f"ProtoFlow classification failed: {e}")
             
             # Fallback: simple pixel-space classification
+            if self.pixel_prototypes is None:
+                print("Warning: No pixel prototypes available, creating random classification")
+                batch_size = image.shape[0]
+                probs = torch.softmax(torch.randn(batch_size, self.num_classes, device=image.device), dim=1)
+                return probs, torch.log(probs)
+            
             similarities = []
             for class_idx in range(self.num_classes):
                 proto = self.pixel_prototypes[class_idx].unsqueeze(0)
