@@ -79,8 +79,12 @@ class ProtoFlowInversion:
     """High-quality inversion for ProtoFlow using its DenseFlow component."""
     
     def __init__(self, protoflow_model: ProtoFlowGMM):
-        self.protoflow = protoflow_model
-        self.flow_model = protoflow_model.model  # DenseFlow component
+        # Unwrap from DistributedDataParallel if needed
+        if hasattr(protoflow_model, 'module'):
+            self.protoflow = protoflow_model.module
+        else:
+            self.protoflow = protoflow_model
+        self.flow_model = self.protoflow.model  # DenseFlow component
         
     def encode_image(self, image: torch.Tensor) -> torch.Tensor:
         """
@@ -113,7 +117,11 @@ class CounterfactualGenerator:
     """Main counterfactual generation module for ProtoFlow."""
     
     def __init__(self, protoflow_model: ProtoFlowGMM, prototypes: ClassConditionalPrototypes):
-        self.protoflow = protoflow_model
+        # Unwrap from DistributedDataParallel if needed
+        if hasattr(protoflow_model, 'module'):
+            self.protoflow = protoflow_model.module
+        else:
+            self.protoflow = protoflow_model
         self.prototypes = prototypes
         self.inversion = ProtoFlowInversion(protoflow_model)
         
@@ -219,10 +227,15 @@ class ProtoFlowCounterfactual:
     """Main integration class for ProtoFlow counterfactuals."""
     
     def __init__(self, protoflow_model: ProtoFlowGMM, features_shape: List[int]):
-        self.protoflow = protoflow_model
+        # Unwrap from DistributedDataParallel if needed
+        if hasattr(protoflow_model, 'module'):
+            self.protoflow = protoflow_model.module
+        else:
+            self.protoflow = protoflow_model
+            
         self.features_shape = features_shape
         self.latent_dim = math.prod(features_shape)  # Flattened latent dimension
-        self.num_classes = len(protoflow_model.gmms)
+        self.num_classes = len(self.protoflow.gmms)
         
         # Initialize components
         self.prototypes = ClassConditionalPrototypes(self.num_classes, self.latent_dim)
@@ -405,8 +418,11 @@ def add_counterfactual_capability(model: ProtoFlowGMM,
                                 save_path: str = None) -> ProtoFlowCounterfactual:
     """Add counterfactual capability to existing ProtoFlow model."""
     
+    # Unwrap from DistributedDataParallel if needed
+    actual_model = model.module if hasattr(model, 'module') else model
+    
     enhanced_model = ProtoFlowCounterfactual(
-        protoflow_model=model,
+        protoflow_model=actual_model,  # Pass the unwrapped model
         features_shape=features_shape
     )
     
@@ -416,7 +432,7 @@ def add_counterfactual_capability(model: ProtoFlowGMM,
     # Save if path provided
     if save_path:
         torch.save({
-            'model_state_dict': model.state_dict(),
+            'model_state_dict': actual_model.state_dict(),  # Use unwrapped model
             'prototypes': enhanced_model.prototypes,
             'features_shape': features_shape,
             'num_classes': enhanced_model.num_classes,
