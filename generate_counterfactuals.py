@@ -28,7 +28,7 @@ def load_protoflow_model(checkpoint_path: str, device: str = 'cuda'):
     """Load ProtoFlow model from checkpoint."""
     
     print(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
     # Extract configuration
     features_shape = checkpoint['features_shape']
@@ -37,16 +37,12 @@ def load_protoflow_model(checkpoint_path: str, device: str = 'cuda'):
     
     print(f"Model config: {num_classes} classes, features shape {features_shape}, latent dim {latent_dim}")
     
-    # We don't need to recreate the DenseFlow model from scratch
-    # Instead, we'll create a minimal ProtoFlowGMM and load the full state dict
-    
-    # Create a dummy flow model - this will be overwritten by the state dict
     class DummyFlow:
         def __init__(self):
             pass
             
         def log_prob(self, x, return_z=True):
-            # This is just a placeholder - the real implementation will be loaded from state dict
+            # This is just a placeholder 
             batch_size = x.shape[0]
             z_shape = [batch_size] + features_shape
             z = torch.randn(z_shape, device=x.device)
@@ -337,11 +333,5 @@ def main():
         import traceback
         traceback.print_exc()
         
-        print("\n💡 Troubleshooting tips:")
-        print("1. Make sure the enhanced checkpoint exists and was created properly")
-        print("2. Check that you have enough GPU memory (reduce --num_samples if needed)")
-        print("3. Verify the dataset name matches what was used in training")
-        print("4. Try running with --device cpu if you have GPU issues")
-
 if __name__ == '__main__':
     main()
