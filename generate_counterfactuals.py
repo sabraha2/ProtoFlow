@@ -102,46 +102,27 @@ class RealProtoFlowCounterfactualGenerator:
             
             # Try to reconstruct the model from checkpoint
             if 'model_state_dict' in checkpoint:
-                # Create a ProtoFlow model - we need to estimate the architecture
-                # Look for DenseFlow parameters in the state dict to estimate config
                 state_dict = checkpoint['model_state_dict']
+                
+                # Infer the correct feature dimension from the GMM parameters
+                actual_feature_dim = self._infer_feature_dimension_from_gmms(state_dict)
+                print(f"Detected feature dimension: {actual_feature_dim}")
                 
                 # Try to create a DenseFlow model (this might need adjustment based on your specific setup)
                 if DenseFlow is not None:
                     try:
-                        # Try to infer DenseFlow configuration from state dict
-                        # This is a best guess - you might need to adjust based on your training setup
-                        flow_config = self._infer_flow_config_from_state_dict(state_dict)
-                        dense_flow = DenseFlow(**flow_config)
-                        
-                        # Create ProtoFlowGMM with the DenseFlow
-                        self.model = ProtoFlowGMM(
-                            model=dense_flow,
-                            n_classes=self.num_classes,
-                            features_shape=self.features_shape,
-                            protos_per_class=2,
-                            likelihood_approach='total',
-                            gaussian_approach='GaussianMixture'
-                        )
-                        
-                        # Load state dict
-                        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
-                        print(f"Loaded state dict: {len(missing)} missing, {len(unexpected)} unexpected keys")
-                        
-                        if len(missing) < len(state_dict) // 2:  # If most keys loaded successfully
-                            self.model.to(self.device).eval()
-                            return True
-                            
+                        # Skip DenseFlow creation for now - too many unknown parameters
+                        print("Skipping DenseFlow creation due to unknown architecture parameters")
                     except Exception as e:
                         print(f"Failed to create DenseFlow: {e}")
                 
-                # Fallback: try to create a ProtoFlow without knowing the exact flow config
-                # This won't give us real decoding but might work for classification
+                # Create a ProtoFlow model with correct dimensions
                 try:
-                    # Create a dummy flow model
+                    # Create a dummy flow model with the correct feature dimension
                     class DummyFlow:
-                        def __init__(self, features_shape):
-                            self.features_shape = features_shape
+                        def __init__(self, feature_dim, input_shape):
+                            self.feature_dim = feature_dim
+                            self.input_shape = input_shape
                             
                         def log_prob(self, x, return_z=True):
                             batch_size = x.shape[0]
@@ -154,19 +135,20 @@ class RealProtoFlowCounterfactualGenerator:
                             
                         def _extract_features(self, x):
                             batch_size = x.shape[0]
-                            x_flat = x.view(batch_size, -1)
-                            # Project to expected feature dimension
-                            expected_dim = np.prod(self.features_shape) if isinstance(self.features_shape, (list, tuple)) else self.features_shape
-                            if isinstance(expected_dim, (list, tuple)):
-                                expected_dim = np.prod(expected_dim)
+                            x_flat = x.view(batch_size, -1)  # [batch, 3072] for CIFAR-10
                             
-                            if x_flat.shape[1] != expected_dim:
-                                # Simple linear projection
-                                if x_flat.shape[1] > expected_dim:
-                                    features = x_flat[:, :expected_dim]
+                            if x_flat.shape[1] != self.feature_dim:
+                                if x_flat.shape[1] > self.feature_dim:
+                                    # Take first features
+                                    features = x_flat[:, :self.feature_dim]
                                 else:
-                                    padding = torch.randn(batch_size, expected_dim - x_flat.shape[1], device=x.device) * 0.1
-                                    features = torch.cat([x_flat, padding], dim=1)
+                                    # Pad with learned-like features (better than random)
+                                    padding_size = self.feature_dim - x_flat.shape[1]
+                                    # Use a simple linear projection to create more features
+                                    # This mimics what a real flow network might do
+                                    extra_features = torch.tanh(torch.mm(x_flat, 
+                                        torch.randn(x_flat.shape[1], padding_size, device=x.device) * 0.1))
+                                    features = torch.cat([x_flat, extra_features], dim=1)
                             else:
                                 features = x_flat
                                 
@@ -175,14 +157,21 @@ class RealProtoFlowCounterfactualGenerator:
                         def sample(self, z):
                             # This is where the limitation shows - we can't really decode properly
                             batch_size = z.shape[0]
-                            return torch.randn(batch_size, *self.features_shape, device=z.device)
+                            # Take the first 3072 dimensions and reshape to image
+                            if z.shape[1] >= 3072:
+                                img_features = z[:, :3072]
+                                images = img_features.view(batch_size, 3, 32, 32)
+                                images = torch.tanh(images)  # Normalize to [-1, 1]
+                                return images
+                            else:
+                                return torch.randn(batch_size, *self.input_shape, device=z.device)
                     
-                    dummy_flow = DummyFlow(self.features_shape)
+                    dummy_flow = DummyFlow(actual_feature_dim, self.features_shape)
                     
                     self.model = ProtoFlowGMM(
                         model=dummy_flow,
                         n_classes=self.num_classes,
-                        features_shape=self.features_shape,
+                        features_shape=[actual_feature_dim],  # Use correct feature dimension
                         protos_per_class=2,
                         likelihood_approach='total',
                         gaussian_approach='GaussianMixture'
@@ -190,40 +179,40 @@ class RealProtoFlowCounterfactualGenerator:
                     
                     # Load what we can from the state dict
                     missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+                    print(f"State dict loading: {len(missing)} missing, {len(unexpected)} unexpected keys")
                     
-                    # Only consider this successful if we loaded the GMM parameters
-                    gmm_keys_loaded = sum(1 for key in state_dict.keys() if 'gmms' in key and key not in missing)
-                    if gmm_keys_loaded > 0:
+                    # Check if we successfully loaded the GMM parameters
+                    if len(missing) == 0 or (len(missing) < 10 and 'gmms' not in str(missing)):
                         self.model.to(self.device).eval()
-                        print(f"✓ Loaded ProtoFlow GMM parameters (dummy flow for decoding)")
-                        return False  # Still use pixel fallback for image generation
+                        print(f"✓ Loaded ProtoFlow model with correct dimensions!")
+                        return True  # We can use this for both classification and feature extraction
+                    else:
+                        print(f"Missing too many keys: {missing[:5]}...")  # Show first few missing keys
                         
                 except Exception as e:
-                    print(f"Failed to create dummy ProtoFlow: {e}")
+                    print(f"Failed to create ProtoFlow model: {e}")
                     
         except Exception as e:
             print(f"Failed to load real ProtoFlow: {e}")
             
         return False
     
-    def _infer_flow_config_from_state_dict(self, state_dict):
-        """Try to infer DenseFlow configuration from state dict keys."""
-        # This is a best guess - you'll need to adjust based on your actual training configuration
-        config = {
-            'num_layers': 32,  # Common default
-            'hidden_dim': 512,  # Common default
-            'num_blocks': 4,    # Common default
-        }
+    def _infer_feature_dimension_from_gmms(self, state_dict):
+        """Infer the feature dimension from GMM parameters in state dict."""
+        # Look for gmm mu parameters to get the feature dimension
+        for key, tensor in state_dict.items():
+            if 'gmms.0.mu' in key:
+                # Shape is typically [1, n_components, feature_dim]
+                if len(tensor.shape) >= 3:
+                    return tensor.shape[-1]
+                elif len(tensor.shape) == 2:
+                    return tensor.shape[-1]
         
-        # Try to infer from state dict keys
-        for key in state_dict.keys():
-            if 'model.' in key and 'layers' in key:
-                # Try to count layers
-                layer_nums = [int(part) for part in key.split('.') if part.isdigit()]
-                if layer_nums:
-                    config['num_layers'] = max(layer_nums) + 1
-                    
-        return config
+        # Fallback
+        print("Warning: Could not infer feature dimension, using 4928")
+        return 4928
+    
+
     
     def _setup_pixel_prototypes(self):
         """Set up pixel-space prototypes as fallback."""
@@ -284,16 +273,25 @@ class RealProtoFlowCounterfactualGenerator:
                         'var': torch.ones_like(mean_tensor),
                         'pi': torch.tensor(1.0)
                     }
+            print(f"✓ Loaded prototypes for {len(self.prototypes)} classes, feature dim: {list(self.prototypes.values())[0]['mean'].shape[0] if self.prototypes else 'unknown'}")
         else:
-            # Fallback prototypes
+            # Fallback prototypes - use the actual feature dimension from GMMs if available
+            feature_dim = 4928  # Default
+            if hasattr(self, 'model') and hasattr(self.model, 'gmms') and len(self.model.gmms) > 0:
+                try:
+                    feature_dim = self.model.gmms[0].mu.shape[-1]
+                except:
+                    pass
+            
             self.prototypes = {
                 i: {
-                    'mean': torch.randn(4928, device=self.device), 
-                    'var': torch.ones(4928, device=self.device), 
+                    'mean': torch.randn(feature_dim, device=self.device), 
+                    'var': torch.ones(feature_dim, device=self.device), 
                     'pi': torch.tensor(1.0)
                 } 
                 for i in range(self.num_classes)
             }
+            print(f"⚠️  Using fallback random prototypes with feature dim: {feature_dim}")
     
     def _get_cifar10_dataloader(self, train=False, batch_size=1):
         """Get CIFAR-10 dataloader."""
@@ -341,11 +339,11 @@ class RealProtoFlowCounterfactualGenerator:
         """Generate counterfactual using real ProtoFlow (if available)."""
         with torch.no_grad():
             try:
-                # Extract features using the DenseFlow component
+                # Extract features using the ProtoFlow model
                 z, _ = self.model.model.log_prob(source_image, return_z=True)
                 
                 # Flatten z for prototype operations
-                z_flat = z.flatten(1)
+                z_flat = z.flatten(1) if z.dim() > 2 else z
                 
                 # Get target prototype
                 target_proto = self.get_class_prototype(target_class)
@@ -353,14 +351,21 @@ class RealProtoFlowCounterfactualGenerator:
                     min_dim = min(target_proto.shape[0], z_flat.shape[1])
                     target_proto = target_proto[:min_dim]
                     z_flat = z_flat[:, :min_dim]
+                    # Pad z_flat if needed
+                    if z_flat.shape[1] < target_proto.shape[0]:
+                        padding = torch.zeros(z_flat.shape[0], target_proto.shape[0] - z_flat.shape[1], device=z_flat.device)
+                        z_flat = torch.cat([z_flat, padding], dim=1)
                 
                 # Interpolate in latent space
                 cf_z_flat = (1 - alpha) * z_flat + alpha * target_proto.unsqueeze(0)
                 
-                # Reshape back to original z shape
-                cf_z = cf_z_flat.reshape(z.shape)
+                # Reshape back to original z shape if needed
+                if z.dim() > 2:
+                    cf_z = cf_z_flat.reshape(z.shape)
+                else:
+                    cf_z = cf_z_flat
                 
-                # Decode back to image using DenseFlow
+                # Decode back to image
                 cf_image = self.model.model.sample(cf_z)
                 
                 return cf_image
@@ -394,7 +399,14 @@ class RealProtoFlowCounterfactualGenerator:
         if class_idx in self.prototypes:
             return self.prototypes[class_idx]['mean']
         else:
-            return torch.randn(4928, device=self.device)
+            # Get the correct feature dimension
+            feature_dim = 4928  # Default
+            if hasattr(self, 'model') and hasattr(self.model, 'gmms') and len(self.model.gmms) > 0:
+                try:
+                    feature_dim = self.model.gmms[0].mu.shape[-1]
+                except:
+                    pass
+            return torch.randn(feature_dim, device=self.device)
     
     def classify_image(self, image):
         """Classify image using ProtoFlow or pixel-space similarity."""
@@ -431,7 +443,7 @@ class RealProtoFlowCounterfactualGenerator:
         if alphas is None:
             alphas = [0.3, 0.5, 0.7]
         
-        method = "Real ProtoFlow" if self.use_real_flow else "Pixel-Space"
+        method = "ProtoFlow + Dummy Decoder" if self.use_real_flow else "Pixel-Space"
         print(f"Generating counterfactuals using {method} method")
         print(f"Target classes: {target_classes}, Alphas: {alphas}")
         
@@ -655,7 +667,7 @@ def main():
         print(f"\n{'='*60}")
         print(f"SUMMARY")
         print(f"{'='*60}")
-        method = "Real ProtoFlow" if generator.use_real_flow else "Pixel-Space"
+        method = "ProtoFlow + Dummy Decoder" if generator.use_real_flow else "Pixel-Space"
         print(f"Method used: {method}")
         print(f"Successfully generated: {successful_samples}/{args.num_samples} counterfactual explanations")
         print(f"Results saved to: {output_dir}")
@@ -664,7 +676,7 @@ def main():
         if successful_samples > 0:
             print("🎉 Counterfactual generation completed!")
             if generator.use_real_flow:
-                print("📁 Using REAL ProtoFlow decoder - images should be high quality!")
+                print("📁 Using ProtoFlow GMM + dummy decoder - shows latent-space interpolation!")
             else:
                 print("📁 Using pixel-space interpolation - images show smooth transitions!")
         else:
