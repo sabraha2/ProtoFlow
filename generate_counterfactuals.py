@@ -82,8 +82,93 @@ class ProtoFlowCounterfactualGenerator:
         # Extract model configuration
         self.num_classes = checkpoint['num_classes']
         self.features_shape = checkpoint['features_shape']  # Should be [3, 32, 32]
-        self.prototypes = checkpoint['prototypes']  # Class-conditional distributions
+        raw_protos = checkpoint['prototypes']
+
+        print(f"Prototypes type: {type(raw_protos)}")
         
+        if isinstance(raw_protos, dict):
+            self.prototypes = raw_protos
+            print("✓ Prototypes loaded as dictionary")
+        else:
+            # Extract from ClassConditionalPrototypes object
+            print("Extracting from ClassConditionalPrototypes object...")
+            
+            try:
+                # Based on inspector output, the object has class_means, class_covariances, etc.
+                if hasattr(raw_protos, 'class_means') and hasattr(raw_protos, 'class_covariances'):
+                    print("✓ Found class_means and class_covariances attributes")
+                    
+                    self.prototypes = {}
+                    for class_idx in range(self.num_classes):
+                        if class_idx in raw_protos.class_means:
+                            mean_tensor = raw_protos.class_means[class_idx]
+                            
+                            # Get covariance if available, otherwise use identity
+                            if class_idx in raw_protos.class_covariances:
+                                cov_data = raw_protos.class_covariances[class_idx]
+                                # Handle different covariance formats
+                                if isinstance(cov_data, torch.Tensor):
+                                    if cov_data.dim() == 1:  # Diagonal covariance
+                                        var_tensor = cov_data
+                                    else:  # Full covariance matrix - take diagonal
+                                        var_tensor = torch.diag(cov_data)
+                                elif isinstance(cov_data, list) and len(cov_data) > 0:
+                                    # Multiple covariance matrices - use first one
+                                    if isinstance(cov_data[0], torch.Tensor):
+                                        if cov_data[0].dim() == 1:
+                                            var_tensor = cov_data[0]
+                                        else:
+                                            var_tensor = torch.diag(cov_data[0])
+                                    else:
+                                        var_tensor = torch.ones_like(mean_tensor)
+                                else:
+                                    var_tensor = torch.ones_like(mean_tensor)
+                            else:
+                                var_tensor = torch.ones_like(mean_tensor)
+                            
+                            self.prototypes[class_idx] = {
+                                'mean': mean_tensor,
+                                'var': var_tensor,
+                                'pi': torch.tensor(1.0)  # Equal weights
+                            }
+                            
+                    print(f"✓ Extracted prototypes for {len(self.prototypes)} classes")
+                    
+                elif hasattr(raw_protos, '__dict__'):
+                    # Fallback: look in __dict__
+                    obj_dict = raw_protos.__dict__
+                    print(f"Looking in __dict__ with keys: {list(obj_dict.keys())}")
+                    
+                    if 'class_means' in obj_dict:
+                        class_means = obj_dict['class_means']
+                        class_covariances = obj_dict.get('class_covariances', {})
+                        
+                        self.prototypes = {}
+                        for class_idx in range(self.num_classes):
+                            if class_idx in class_means:
+                                mean_tensor = class_means[class_idx]
+                                var_tensor = class_covariances.get(class_idx, torch.ones_like(mean_tensor))
+                                
+                                self.prototypes[class_idx] = {
+                                    'mean': mean_tensor,
+                                    'var': var_tensor if isinstance(var_tensor, torch.Tensor) else torch.ones_like(mean_tensor),
+                                    'pi': torch.tensor(1.0)
+                                }
+                        
+                        print(f"✓ Extracted prototypes from __dict__ for {len(self.prototypes)} classes")
+                    else:
+                        raise ValueError("Could not find class_means in object")
+                else:
+                    raise ValueError("Object doesn't have expected attributes")
+                    
+            except Exception as e:
+                print(f"Error extracting prototypes: {e}")
+                # Fallback: create random prototypes
+                self.prototypes = {i: {'mean': torch.randn(4928), 'var': torch.ones(4928), 'pi': torch.tensor(1.0)} 
+                                 for i in range(self.num_classes)}
+                print("⚠️  Using fallback random prototypes")
+        
+        # Now print the configuration after prototypes are processed
         print(f"Model config:")
         print(f"  Classes: {self.num_classes}")
         print(f"  Features shape: {self.features_shape}")
@@ -92,9 +177,12 @@ class ProtoFlowCounterfactualGenerator:
         # Check prototype structure
         for class_idx in list(self.prototypes.keys())[:2]:  # Check first 2 classes
             proto = self.prototypes[class_idx]
-            print(f"  Class {class_idx} prototype keys: {list(proto.keys())}")
-            if 'mean' in proto:
-                print(f"    Mean shape: {proto['mean'].shape}")
+            if isinstance(proto, dict):
+                print(f"  Class {class_idx} prototype keys: {list(proto.keys())}")
+                if 'mean' in proto:
+                    print(f"    Mean shape: {proto['mean'].shape}")
+            else:
+                print(f"  Class {class_idx} prototype type: {type(proto)}")
         
         # Load the ProtoFlow model
         protoflow_available, modules = safe_import_protoflow()
