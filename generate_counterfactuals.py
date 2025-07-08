@@ -43,7 +43,33 @@ class ProtoFlowCounterfactualGenerator:
         """Load the enhanced ProtoFlow model with counterfactual capabilities."""
         print(f"Loading enhanced model from {checkpoint_path}")
         
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+        # Handle PyTorch 2.6+ weights_only safety restrictions
+        try:
+            # First try: weights_only=False (safe for our own checkpoint)
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            print("✓ Checkpoint loaded with weights_only=False")
+        except Exception as e1:
+            print(f"Loading with weights_only=False failed: {e1}")
+            try:
+                # Second try: allowlist custom classes
+                import torch.serialization
+                try:
+                    from protoflow.counterfactual import ClassConditionalPrototypes
+                    with torch.serialization.safe_globals([ClassConditionalPrototypes]):
+                        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+                    print("✓ Checkpoint loaded with safe globals")
+                except ImportError:
+                    # If we can't import the class, just load without weights_only
+                    checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                    print("✓ Checkpoint loaded without weights_only")
+            except Exception as e2:
+                print(f"Loading with safe globals failed: {e2}")
+                try:
+                    # Final fallback: no weights_only parameter
+                    checkpoint = torch.load(checkpoint_path, map_location=self.device)
+                    print("✓ Checkpoint loaded (fallback method)")
+                except Exception as e3:
+                    raise RuntimeError(f"Could not load checkpoint with any method: {e3}")
         
         # Debug: Print checkpoint keys
         print("Checkpoint keys:", list(checkpoint.keys()))
