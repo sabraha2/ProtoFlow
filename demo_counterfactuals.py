@@ -388,13 +388,15 @@ class DemoCounterfactualGenerator:
         num_targets = len(counterfactuals)
         num_alphas = len(next(iter(counterfactuals.values())))
         cols = num_alphas + 1  # +1 for source image
-        rows = num_targets + 1  # +1 for header row
+        rows = num_targets + 2  # +1 for header row, +1 for source image row
         
         fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
         if rows == 1:
             axes = axes.reshape(1, -1)
-        if cols == 1:
+        elif cols == 1:
             axes = axes.reshape(-1, 1)
+        else:
+            axes = axes
         
         def show_image(ax, img_tensor, title, success=None):
             """Helper function to display an image."""
@@ -442,20 +444,22 @@ class DemoCounterfactualGenerator:
             row = row_idx + 2
             
             # Target class label
-            axes[row, 0].text(0.5, 0.5, f'→ {class_names[target_class]}', 
-                             ha='center', va='center', 
-                             transform=axes[row, 0].transAxes, fontsize=12, fontweight='bold')
-            
-            # Counterfactual images
-            for col_idx, (alpha, cf_image) in enumerate(alphas_dict.items()):
-                try:
-                    # Try to classify the counterfactual
-                    predicted_class = self.classify_image(cf_image)
-                    success = predicted_class == target_class
-                    show_image(axes[row, col_idx + 1], cf_image, 
-                              f'α={alpha}', success)
-                except Exception as e:
-                    show_image(axes[row, col_idx + 1], cf_image, f'α={alpha}', False)
+            if row < axes.shape[0]:
+                axes[row, 0].text(0.5, 0.5, f'→ {class_names[target_class]}', 
+                                 ha='center', va='center', 
+                                 transform=axes[row, 0].transAxes, fontsize=12, fontweight='bold')
+                
+                # Counterfactual images
+                for col_idx, (alpha, cf_image) in enumerate(alphas_dict.items()):
+                    if col_idx + 1 < axes.shape[1]:
+                        try:
+                            # Try to classify the counterfactual
+                            predicted_class = self.classify_image(cf_image)
+                            success = predicted_class == target_class
+                            show_image(axes[row, col_idx + 1], cf_image, 
+                                      f'α={alpha}', success)
+                        except Exception as e:
+                            show_image(axes[row, col_idx + 1], cf_image, f'α={alpha}', False)
         
         plt.tight_layout()
         return fig
