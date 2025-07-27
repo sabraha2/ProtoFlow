@@ -137,57 +137,57 @@ class DenseFlowCounterfactualGenerator:
     
     def _extract_flow_config(self):
         """Extract DenseFlow configuration from the loaded config."""
-        # Default configuration based on dataset
+        # Default configuration based on dataset - using correct DenseFlow parameters
         default_configs = {
             'cifar10': {
-                'input_shape': [3, 32, 32],
-                'n_blocks': 4,
-                'n_hidden': 64,
-                'n_squeeze': 1,
-                'n_split': 2,
-                'act_norm': True,
-                'lu': True,
-                'coupling': 'affine',
+                'data_shape': (3, 32, 32),
+                'block_config': [2, 4, 3],
+                'layers_config': [2, 2, 2],
+                'layer_mid_chnls': [6, 12, 20],
+                'growth_rate': 4,
+                'num_bits': 8,
+                'checkpointing': True,
+                'base_dist': True,
             },
             'cifar100': {
-                'input_shape': [3, 32, 32],
-                'n_blocks': 4,
-                'n_hidden': 64,
-                'n_squeeze': 1,
-                'n_split': 2,
-                'act_norm': True,
-                'lu': True,
-                'coupling': 'affine',
+                'data_shape': (3, 32, 32),
+                'block_config': [2, 4, 3],
+                'layers_config': [2, 2, 2],
+                'layer_mid_chnls': [6, 12, 20],
+                'growth_rate': 4,
+                'num_bits': 8,
+                'checkpointing': True,
+                'base_dist': True,
             },
             'cub200': {
-                'input_shape': [3, 64, 64],
-                'n_blocks': 4,
-                'n_hidden': 64,
-                'n_squeeze': 1,
-                'n_split': 2,
-                'act_norm': True,
-                'lu': True,
-                'coupling': 'affine',
+                'data_shape': (3, 64, 64),
+                'block_config': [2, 4, 3],
+                'layers_config': [2, 2, 2],
+                'layer_mid_chnls': [6, 12, 20],
+                'growth_rate': 4,
+                'num_bits': 8,
+                'checkpointing': True,
+                'base_dist': True,
             },
             'flowers': {
-                'input_shape': [3, 64, 64],
-                'n_blocks': 4,
-                'n_hidden': 64,
-                'n_squeeze': 1,
-                'n_split': 2,
-                'act_norm': True,
-                'lu': True,
-                'coupling': 'affine',
+                'data_shape': (3, 64, 64),
+                'block_config': [2, 4, 3],
+                'layers_config': [2, 2, 2],
+                'layer_mid_chnls': [6, 12, 20],
+                'growth_rate': 4,
+                'num_bits': 8,
+                'checkpointing': True,
+                'base_dist': True,
             },
             'pets': {
-                'input_shape': [3, 64, 64],
-                'n_blocks': 4,
-                'n_hidden': 64,
-                'n_squeeze': 1,
-                'n_split': 2,
-                'act_norm': True,
-                'lu': True,
-                'coupling': 'affine',
+                'data_shape': (3, 64, 64),
+                'block_config': [2, 4, 3],
+                'layers_config': [2, 2, 2],
+                'layer_mid_chnls': [6, 12, 20],
+                'growth_rate': 4,
+                'num_bits': 8,
+                'checkpointing': True,
+                'base_dist': True,
             }
         }
         
@@ -206,8 +206,8 @@ class DenseFlowCounterfactualGenerator:
     def _get_flow_feature_dim(self, flow_model, config):
         """Get the actual feature dimension from the flow model."""
         try:
-            input_shape = config.get('input_shape', [3, 32, 32])
-            dummy_input = torch.randn(1, *input_shape, device=self.device)
+            data_shape = config.get('data_shape', (3, 32, 32))
+            dummy_input = torch.randn(1, *data_shape, device=self.device)
             
             with torch.no_grad():
                 z, _ = flow_model.log_prob(dummy_input, return_z=True)
@@ -217,8 +217,8 @@ class DenseFlowCounterfactualGenerator:
                 
         except Exception as e:
             print(f"Could not determine flow feature dim: {e}")
-            input_shape = config.get('input_shape', [3, 32, 32])
-            return np.prod(input_shape)
+            data_shape = config.get('data_shape', (3, 32, 32))
+            return np.prod(data_shape)
     
     def get_dataset_loader(self, train=False, batch_size=1):
         """Get dataloader for the specific dataset."""
